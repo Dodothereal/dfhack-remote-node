@@ -79,8 +79,13 @@ jobs:
       - run: npm run lint
       - run: npm test
 
+      # `npm pack --pack-destination` does not create the directory it writes
+      # into — it fails with ENOENT — so make it first.
       - name: Pack the tarball that will be published
-        run: npm pack --pack-destination ./release-artifact
+        run: |
+          set -euo pipefail
+          mkdir -p release-artifact
+          npm pack --pack-destination ./release-artifact
 
       - uses: actions/upload-artifact@v4
         with:

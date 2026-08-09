@@ -19,6 +19,8 @@ Built primarily as the RPC layer for a DFHack MCP server.
 npm install dfhack-remote-node
 ```
 
+Requires **Node 20 or newer** — that is what `dist/` is compiled for.
+
 The published package ships prebuilt (`dist/` ESM + type declarations, proto
 bundle inlined), so no build step is needed to consume it.
 
@@ -28,6 +30,10 @@ To work on the library from a clone instead:
 npm install
 npm run build     # regenerates build/proto.json and bundles dist/
 ```
+
+Developing on a clone needs **Node 24** (see `.nvmrc`). That is a stricter bar
+than consuming the package: the tests run the TypeScript sources directly via
+type-stripping and JSON import attributes, which need Node 23.6+.
 
 `build/proto.json` (the compiled protobuf bundle) is committed, so the source
 runs immediately; `npm run build` produces the distributable `dist/` (ESM +

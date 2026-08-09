@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-08-09
+
+### Fixed
+
+- `engines.node` now declares `>=20` rather than `>=18`. `dist/` is compiled
+  for node20, so the old range advertised support for runtimes the package was
+  never built against.
+
+### Documentation
+
+- README states the Node 20 runtime floor, and separately the Node 24 needed to
+  develop on a clone (the tests run the TypeScript sources directly, which needs
+  type-stripping and JSON import attributes from Node 23.6+).
+
 ## [2.0.0] - 2026-07-16
 
 Forked from [alexchandel/dfhack-remote](https://github.com/alexchandel/dfhack-remote)
@@ -29,5 +43,6 @@ and rewritten as a maintained Node library.
 - `build/proto.json` is committed (runtime-required; consumers need no build
   step). Regenerate with `npm run gen-proto` after editing any `proto/*.proto`.
 
-[Unreleased]: https://github.com/alexanderolvera/dfhack-remote-node/compare/v2.0.0...HEAD
+[Unreleased]: https://github.com/alexanderolvera/dfhack-remote-node/compare/v2.0.1...HEAD
+[2.0.1]: https://github.com/alexanderolvera/dfhack-remote-node/compare/v2.0.0...v2.0.1
 [2.0.0]: https://github.com/alexanderolvera/dfhack-remote-node/releases/tag/v2.0.0

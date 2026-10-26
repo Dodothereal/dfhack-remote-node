@@ -1,10 +1,10 @@
 {
   "name": "dfhack-remote-node",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Node client for the DFHack Remote RPC protocol (protobuf over TCP)",
   "type": "module",
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "main": "./dist/index.js",
   "module": "./dist/index.js",

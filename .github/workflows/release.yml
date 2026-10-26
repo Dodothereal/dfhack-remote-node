@@ -1,0 +1,180 @@
+name: Release
+
+# Cut a release by pushing a version tag:
+#
+#   npm version <patch|minor|major>   # bumps package.json, commits, tags vX.Y.Z
+#   git push --follow-tags
+#
+# The tag push runs this workflow: build + verify, then a GATED publish to npm
+# via Trusted Publishing (OIDC, with provenance) and a matching GitHub Release.
+# The tarball is built once in `verify` and promoted to `publish` — no rebuild.
+#
+# ── One-time setup (both are required before the first tag) ────────────────
+# 1. Approval gate — repo Settings → Environments → New environment
+#    "npm-production" → enable "Required reviewers" and add yourself. The
+#    publish job then waits for your click in the Actions UI before it runs.
+#    (This is the analogue of an Azure DevOps release approval gate.)
+#
+# 2. npm Trusted Publishing (no stored token) — on npmjs.com open the
+#    dfhack-remote-node package → Settings → Trusted Publishing → add a
+#    GitHub Actions publisher:
+#      Repository:   alexanderolvera/dfhack-remote-node
+#      Workflow:     release.yml
+#      Environment:  npm-production
+#    npm then accepts this workflow's OIDC identity instead of an NPM_TOKEN,
+#    and stamps each published version with a provenance attestation.
+#    (Provenance requires this to stay a PUBLIC repo — it is.)
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    # No `actions:` scope here on purpose. Within a single run, upload-artifact
+    # authenticates with the Actions runtime token, not GITHUB_TOKEN — the
+    # `actions` permission is only needed to reach artifacts across runs or
+    # repos. Granting `actions: write` would also hand this job the ability to
+    # cancel runs and delete artifacts, which a verify step has no business
+    # holding.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Tag must match package.json version
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          pkg=$(node -p "require('./package.json').version")
+          echo "tag=$tag  package.json=$pkg"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::Tag v$tag does not match package.json version $pkg. Bump with 'npm version' so the two agree."
+            exit 1
+          fi
+
+      - name: Refuse to republish an existing version
+        run: |
+          set -euo pipefail
+          pkg=$(node -p "require('./package.json').version")
+          if npm view "dfhack-remote-node@$pkg" version >/dev/null 2>&1; then
+            echo "::error::dfhack-remote-node@$pkg is already on npm — nothing to publish."
+            exit 1
+          fi
+
+      - run: npm ci
+      - run: npm run build
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+
+      # `npm pack --pack-destination` does not create the directory it writes
+      # into — it fails with ENOENT — so make it first.
+      - name: Pack the tarball that will be published
+        run: |
+          set -euo pipefail
+          mkdir -p release-artifact
+          npm pack --pack-destination ./release-artifact
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-tarball
+          path: release-artifact/*.tgz
+          retention-days: 7
+          if-no-files-found: error
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    environment: npm-production          # ← approval gate + trusted-publisher scope
+    permissions:
+      contents: write                    # create the GitHub Release
+      id-token: write                    # OIDC for npm Trusted Publishing + provenance
+    steps:
+      - uses: actions/checkout@v4         # for CHANGELOG extraction and gh
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: "https://registry.npmjs.org"
+
+      # OIDC trusted publishing landed in npm 11.5.1, so that is a floor, not a
+      # target: installing it flat would *downgrade* the newer npm that Node 24
+      # already bundles. Upgrade only when we are actually below the floor, and
+      # to a pinned version, so the release path never depends on whatever
+      # `npm@latest` happens to be on release day.
+      - name: Ensure npm supports OIDC trusted publishing
+        env:
+          MIN_NPM: 11.5.1
+        run: |
+          set -euo pipefail
+          have=$(npm --version)
+          echo "bundled npm=$have  minimum=$MIN_NPM"
+          if [ "$(printf '%s\n%s\n' "$have" "$MIN_NPM" | sort -V | head -n1)" = "$MIN_NPM" ]; then
+            echo "npm $have is new enough."
+          else
+            echo "Upgrading to npm@$MIN_NPM"
+            npm install -g "npm@$MIN_NPM"
+          fi
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm-tarball
+          path: release-artifact
+
+      # Resolve the tarball once, before either consumer runs, so the check
+      # cannot drift between the publish step and the release step.
+      - name: Resolve the tarball to publish
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          tgzs=(release-artifact/*.tgz)
+          if [ ${#tgzs[@]} -ne 1 ]; then
+            echo "::error::Expected exactly one tarball in release-artifact/, found ${#tgzs[@]}: ${tgzs[*]-none}"
+            exit 1
+          fi
+          echo "TGZ=${tgzs[0]}" >> "$GITHUB_ENV"
+          echo "Tarball: ${tgzs[0]}"
+
+      - name: Publish to npm (Trusted Publishing / provenance)
+        run: |
+          set -euo pipefail
+          echo "Publishing $TGZ"
+          npm publish "$TGZ" --provenance --access public
+
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          # Extract this version's section body from CHANGELOG.md, if present.
+          # Regex-free (literal substring match) so it behaves the same on any
+          # awk flavor; stops at the next "## [" header or the trailing
+          # "[link]: url" reference block.
+          notes=$(awk -v hdr="## [$version]" '
+            substr($0, 1, length(hdr)) == hdr { flag = 1; next }
+            flag && substr($0, 1, 4) == "## [" { exit }
+            flag && substr($0, 1, 1) == "["    { exit }
+            flag { print }
+          ' CHANGELOG.md)
+          if [ -n "${notes//[[:space:]]/}" ]; then
+            printf '%s\n' "$notes" > notes.md
+            gh release create "$TAG" "$TGZ" --title "$TAG" --notes-file notes.md --verify-tag
+          else
+            # No changelog section for this version — let GitHub autogenerate notes.
+            gh release create "$TAG" "$TGZ" --title "$TAG" --generate-notes --verify-tag
+          fi

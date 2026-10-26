@@ -39,6 +39,19 @@ interface PendingCall {
   reject: (err: Error) => void;
 }
 
+/**
+ * Settlement handle for one outstanding connect() attempt. teardown() owns it
+ * so a socket that dies (or is closed) before the handshake reply rejects the
+ * caller's promise immediately instead of leaving it pending forever. It is
+ * settled at most once, so a stale event from a dead socket can never settle a
+ * replacement's handshake.
+ */
+interface Handshake {
+  settled: boolean;
+  succeed: () => void;
+  fail: (err: Error) => void;
+}
+
 export class DfConnection {
   readonly host: string;
   readonly port: number;
@@ -46,6 +59,7 @@ export class DfConnection {
   private readonly decodeText: TextDecoder;
   private sock: net.Socket | null = null;
   private ready: Promise<void> | null = null;
+  private handshake: Handshake | null = null;
   private buf: Buffer = Buffer.alloc(0);
   private shookHands = false;
   private queue: PendingCall[] = [];
@@ -68,28 +82,61 @@ export class DfConnection {
   /** Connect and complete the handshake. Resolves once ready for calls. */
   connect(): Promise<void> {
     if (this.ready) return this.ready;
+
+    let sock: net.Socket;
+    try {
+      sock = net.createConnection({ host: this.host, port: this.port });
+    } catch (err) {
+      // Nothing to tear down: report synchronously-created failure as a rejection.
+      return Promise.reject(err as Error);
+    }
+    this.sock = sock;
+
+    let resolveReady!: () => void;
+    let rejectReady!: (err: Error) => void;
     this.ready = new Promise<void>((resolve, reject) => {
-      const sock = net.createConnection({ host: this.host, port: this.port });
-      this.sock = sock;
-      const current = () => this.sock === sock;
-      sock.on('connect', () => sock.write(REQUEST_MAGIC));
-      sock.on('data', (chunk: Buffer) => {
-        if (!current()) return;
-        try {
-          this.onData(chunk, resolve);
-        } catch (err) {
-          this.fail(err as Error);
-          reject(err as Error);
-        }
-      });
-      sock.on('error', (err) => {
-        if (current()) this.fail(err);
-        reject(err);
-      });
-      sock.on('close', () => {
-        if (current()) this.fail(new Error('connection closed'));
-      });
+      resolveReady = resolve;
+      rejectReady = reject;
     });
+
+    // Owned by teardown() so every abort path settles it exactly once.
+    const handshake: Handshake = {
+      settled: false,
+      succeed: () => {
+        if (handshake.settled) return;
+        handshake.settled = true;
+        if (this.handshake === handshake) this.handshake = null;
+        resolveReady();
+      },
+      fail: (err) => {
+        if (handshake.settled) return;
+        handshake.settled = true;
+        if (this.handshake === handshake) this.handshake = null;
+        rejectReady(err);
+      },
+    };
+    this.handshake = handshake;
+
+    const current = () => this.sock === sock;
+
+    sock.on('connect', () => {
+      if (current()) sock.write(REQUEST_MAGIC);
+    });
+    sock.on('data', (chunk: Buffer) => {
+      if (!current()) return;
+      try {
+        this.onData(chunk, handshake.succeed);
+      } catch (err) {
+        this.fail(err as Error);
+      }
+    });
+    sock.on('error', (err) => {
+      if (current()) this.fail(err);
+    });
+    sock.on('close', () => {
+      if (current()) this.fail(new Error('connection closed'));
+    });
+
     return this.ready;
   }
 
@@ -170,11 +217,17 @@ export class DfConnection {
 
   private teardown(err: Error, destroy: boolean): void {
     const sock = this.sock;
+    const handshake = this.handshake;
     this.sock = null;
+    this.handshake = null;
     this.shookHands = false;
     this.ready = null;
     this.buf = Buffer.alloc(0);
     this.textFrames = [];
+
+    // Settle the outstanding connect() before the socket is taken down, so
+    // callers observe the causal error at teardown time.
+    if (handshake) handshake.fail(err);
 
     if (sock) {
       if (destroy) sock.destroy(err);

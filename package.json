@@ -28,7 +28,7 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "format": "prettier --write .",
-    "test": "node scripts/mock-server-test.js",
+    "test": "node scripts/mock-server-test.js && node scripts/lifecycle-test.js",
     "spike": "node scripts/m0-spike.js",
     "prepare": "npm run build"
   },

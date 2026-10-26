@@ -71,8 +71,10 @@ export class DfConnection {
     this.ready = new Promise<void>((resolve, reject) => {
       const sock = net.createConnection({ host: this.host, port: this.port });
       this.sock = sock;
+      const current = () => this.sock === sock;
       sock.on('connect', () => sock.write(REQUEST_MAGIC));
       sock.on('data', (chunk: Buffer) => {
+        if (!current()) return;
         try {
           this.onData(chunk, resolve);
         } catch (err) {
@@ -81,13 +83,11 @@ export class DfConnection {
         }
       });
       sock.on('error', (err) => {
-        this.fail(err);
+        if (current()) this.fail(err);
         reject(err);
       });
       sock.on('close', () => {
-        if (this.sock) {
-          this.fail(new Error('connection closed'));
-        }
+        if (current()) this.fail(new Error('connection closed'));
       });
     });
     return this.ready;
@@ -168,29 +168,30 @@ export class DfConnection {
     });
   }
 
-  private fail(err: Error): void {
-    if (this.sock) {
-      this.sock.destroy(err);
-      this.sock = null;
-    }
+  private teardown(err: Error, destroy: boolean): void {
+    const sock = this.sock;
+    this.sock = null;
     this.shookHands = false;
     this.ready = null;
+    this.buf = Buffer.alloc(0);
+    this.textFrames = [];
+
+    if (sock) {
+      if (destroy) sock.destroy(err);
+      else sock.end();
+    }
+
     const pending = this.active ? [this.active, ...this.queue] : [...this.queue];
     this.active = null;
     this.queue = [];
     for (const call of pending) call.reject(err);
-    this.buf = Buffer.alloc(0);
-    this.textFrames = [];
+  }
+
+  private fail(err: Error): void {
+    this.teardown(err, true);
   }
 
   close(): void {
-    if (this.sock) {
-      this.sock.end();
-      this.sock = null;
-    }
-    this.shookHands = false;
-    this.ready = null;
-    this.buf = Buffer.alloc(0);
-    this.textFrames = [];
+    this.teardown(new Error('connection closed'), false);
   }
 }
